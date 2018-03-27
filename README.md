@@ -88,8 +88,16 @@ directory; it uses the Python API. It is probably the most popular
 lastfmsubmitd client; the author, an MPD user, created lastfmsubmitd
 specifically so that he could write it.
 
-Author and License
-==================
+Notes about this fork.
+======================
+
+At some point scrobbling songs on Libre.fm stopped working in lastfmsubmitd.
+This version uses the library [pylast](https://github.com/pylast/pylast)
+to submit played songs and only submit songs to Libre.fm (hardcoded).
+User and password and still read from the configuration file.
+
+lastfmsubmitd: Author and License
+=================================
 
 Copyright © 2005-2010 Decklin Foster <decklin@red-bean.com>.
 
@@ -111,6 +119,12 @@ IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+pylast: License
+===============
+This fork of lastfmsubmitd contains a copy of [pylast](https://github.com/pylast/pylast)
+which is release under Apache Public License 2.0.
+
 
 Because This is for Last.fm, After All
 ======================================

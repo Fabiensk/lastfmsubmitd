@@ -3,6 +3,7 @@
 import sys
 import os
 import time
+import calendar
 import getopt
 import socket
 import urllib
@@ -18,6 +19,8 @@ import lastfm.client
 import lastfm.config
 import lastfm.marshaller
 
+import pylast
+
 DAEMON_NAME = 'lastfmsubmitd'
 USAGE = 'usage: %s [--debug] [--no-daemon] [--no-network] [--help]' % \
     DAEMON_NAME
@@ -26,8 +29,6 @@ CLIENT_ID = 'lsd'
 CLIENT_VERSION = '1.0.6'
 
 SERVER_URL = 'http://post.audioscrobbler.com/'
-PROTOCOL_VERSION = '1.1'
-SUB_CHUNK_SIZE = 10
 DEF_INTERVAL = 1
 
 # This should be something small, because the server times out quickly. If
@@ -129,142 +130,27 @@ class LsdSpool:
 class LastFmSession:
     def __init__(self, cli):
         self.cli = cli
-        self.connected = False
-        self.interval = DEF_INTERVAL
-        self.uncommitted_subs = []
-        self.handshake_url = self.make_handshake_url()
-        self.submit_url = None
-
-    def make_handshake_url(self):
-        args = {
-            'hs': 'true',
-            'p': PROTOCOL_VERSION,
-            'c': CLIENT_ID,
-            'v': CLIENT_VERSION,
-            'u': self.cli.conf.user,
-            }
-        return '?'.join([self.cli.conf.url, urllib.urlencode(args)])
-
-    def handshake(self):
-        self.cli.log.debug('Handshake URL: %s' % self.handshake_url)
-
-        try:
-            signal.alarm(HTTP_TIMEOUT)
-            response = urllib.urlopen(self.handshake_url)
-            status_line = response.readline().strip()
-            signal.alarm(0)
-        # XXX: handshaketimeouterror?
-        except IOError, e:
-            signal.alarm(0)
-            raise HandshakeError(e)
-
-        if status_line == 'UPTODATE':
-            self.read_submit_url(response)
-        elif status_line.startswith('UPDATE'):
-            try:
-                msg, url = status_line.split(' ', 1)
-                self.cli.log.warning('Plugin is out of date: %s' % msg)
-                self.cli.log.info('Please go to %s to upgrade' % url)
-            except ValueError:
-                self.cli.log.warning('Plugin is out of date')
-            self.read_submit_url(response)
-        elif status_line == 'BADUSER':
-            raise HandshakeError('bad username')
-        elif status_line.startswith('FAILED'):
-            try:
-                failed, reason = status_line.split(' ', 1)
-            except ValueError:
-                reason = 'unknown: "%s"' % status_line
-            raise HandshakeError(reason)
-        else:
-            raise HandshakeError("can't parse response: %s" % status_line)
-
         self.connected = True
-        self.read_interval(response)
-        time.sleep(self.interval)
-
-    def read_submit_url(self, response):
-        challenge = response.readline().strip()
-        self.session_key = self.digest(challenge)
-        self.submit_url = response.readline().strip()
-        self.cli.log.info('Handshake sucessful')
-        self.cli.log.debug('Submit URL: %s' % self.submit_url)
-
-    def read_interval(self, response):
-        interval_line = response.readline().strip()
-        if interval_line and interval_line.startswith('INTERVAL'):
-            msg, secs = interval_line.split(' ', 1)
-            interval = int(secs)
-            if interval != self.interval:
-                self.cli.log.debug('Session interval changed to %d' % interval)
-                self.interval = interval
-
-    def digest(self, challenge):
-        pass_hash = md5(self.cli.conf.password)
-        sess_hash = md5(pass_hash.hexdigest() + challenge)
-        return sess_hash.hexdigest()
+        self.interval = DEF_INTERVAL
+        API_KEY = "1f69db80ecd47ee4c669a471d259f522"
+        API_SECRET = "7ad6d396a3a0d526bb50ab8c9af5a3da"
+        self.network = pylast.LibreFMNetwork(api_key=API_KEY, api_secret=API_SECRET,
+                        username=self.cli.conf.user, password_hash=pylast.md5(self.cli.conf.password))
 
     def submit(self, spool):
-        while spool.subs:
-            chunk = spool.subs[:SUB_CHUNK_SIZE]
-            args = {'u': self.cli.conf.user, 's': self.session_key}
-            post_data = [urllib.urlencode(args)]
-            for i, sub in enumerate(chunk):
-                args = {}
-                args['a[%d]'%i] = utf8(sub['artist'])
-                args['t[%d]'%i] = utf8(sub['title'])
-                args['l[%d]'%i] = utf8(sub['length'])
-                args['i[%d]'%i] = time.strftime(lastfm.TIME_FMT, sub['time'])
-                try:
-                    args['b[%d]' % i] = utf8(sub['album'])
-                except KeyError:
-                    args['b[%d]' % i] = ''
-                try:
-                    args['m[%d]' % i] = utf8(sub['mbid'])
-                except KeyError:
-                    args['m[%d]' % i] = ''
-                self.cli.log.info('Submitting: %s' % lastfm.repr(sub))
-                post_data.append(urllib.urlencode(args))
+        records = []
+        for sub in spool.subs:
+            rec = {}
+            rec['artist'] = sub['artist']
+            rec['title'] = sub['title']
+            rec['timestamp'] = calendar.timegm(sub['time'])
+            rec['album'] = sub['album']
+            rec['duration'] = sub['length']
+            records.append(rec)
+        self.network.scrobble_many(records)
+        spool.subs = []
+        spool.sync()
 
-            post_str = '&'.join(post_data)
-            self.cli.log.debug('POST data: %s' % post_str)
-            try:
-                signal.alarm(HTTP_TIMEOUT)
-                response = urllib.urlopen(self.submit_url, post_str)
-                signal.alarm(0)
-            except (IOError, AttributeError), e:
-                # The AttributeError is some bizarre urllib bug where
-                # http_error_default tries to make an addinfourl with an fp
-                # that's actually None. I have no idea. It should be IOError.
-                signal.alarm(0)
-                raise SubTimeoutError(e)
-
-            failed = False
-            status_line = response.readline().strip()
-
-            if status_line == 'OK':
-                self.cli.log.info('Submission(s) accepted')
-                # Now, and only now, we do our side effect.
-                spool.subs = spool.subs[SUB_CHUNK_SIZE:]
-                spool.sync()
-            elif status_line == 'BADAUTH':
-                self.connected = False
-                raise SessionError('incorrect password')
-            elif status_line == 'BADSESSION':
-                self.cli.log.info('session failed, reconnecting')
-                self.handshake()
-            elif status_line.startswith('FAILED'):
-                try:
-                    failed, reason = status_line.split(' ', 1)
-                except ValueError:
-                    reason = 'unknown: "%s"' % status_line
-                raise InvalidSubError(reason)
-            else:
-                raise InvalidSubError("can't parse response: %s" %
-                    status_line)
-
-            self.read_interval(response)
-            time.sleep(self.interval)
 
 class LsdConfig(lastfm.config.Config):
     def __init__(self):
@@ -323,6 +209,9 @@ def daemon(cli, online):
                     throttle.backoff()
                 except SubTimeoutError:
                     cli.log.error('Submission timed out')
+                    throttle.backoff()
+                except Exception as e:                
+                    cli.log.error('Other error')
                     throttle.backoff()
 
         throttle.sleep(cli.conf.sleep_time)
